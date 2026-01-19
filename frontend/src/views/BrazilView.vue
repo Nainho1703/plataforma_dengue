@@ -107,180 +107,180 @@
 </template>
 
 <script setup>
-import { onMounted, ref, computed, nextTick } from 'vue';
-import L from 'leaflet';
+import { ref, onMounted, computed, watch, onUnmounted } from 'vue';
 import axios from 'axios';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 
-// ESTADO
-const allWeeks = ref([]); 
-const sliderIndex = ref(0);
-const loadingWeeks = ref(true);
-const loadingMap = ref(false);
-const tableData = ref([]); 
-const mapError = ref(null); // Nuevo estado para errores visibles
+// --- ESTADO ---
+const weeks = ref([]); 
+const selectedWeekIndex = ref(0);
+const loading = ref(false);
+const error = ref(null);
+const isPlaying = ref(false);
+let playInterval = null;
 
-// MAPA
+// --- CACHÉ (LA CLAVE PARA LA VELOCIDAD) ---
+const dataCache = new Map();
+
 let map = null;
 let geoJsonLayer = null;
 
-// COMPUTADOS
-const currentWeekLabel = computed(() => allWeeks.value[sliderIndex.value] || 'Cargando...');
-const uniqueYears = computed(() => {
-  const years = new Set(allWeeks.value.map(w => w.split('-')[0]));
-  return Array.from(years).sort().reverse();
-});
-const selectedYear = ref(""); 
-const weeksInSelectedYear = computed(() => {
-  if (!selectedYear.value) return [];
-  return allWeeks.value.filter(w => w.startsWith(selectedYear.value)).map(w => w.split('-')[1]);
-});
-const selectedWeekOnly = ref(""); 
+// --- CORRECCIÓN: URL SIN AWAIT ---
+const API_URL = import.meta.env.VITE_API_BASE_URL;
+const API_BASE = `${API_URL}/api`; 
 
-// INICIO
+// --- COMPUTADAS ---
+const currentWeek = computed(() => {
+  if (weeks.value.length === 0) return '';
+  return weeks.value[selectedWeekIndex.value];
+});
+
+// --- CICLO DE VIDA ---
 onMounted(async () => {
   initMap();
-  try {
-    const API_URL = import.meta.env.VITE_API_BASE_URL;
-
-    const res = await axios.get(`${API_URL}/api/brasil/weeks`);
-
-
-    allWeeks.value = res.data;
-    console.log("📅 Semanas cargadas:", allWeeks.value.length); // ALARMA 1
-    
-    if (allWeeks.value.length > 0) {
-      // Intentamos ir a una semana intermedia (a veces la última está vacía de datos)
-      // O vamos a la última disponible
-      sliderIndex.value = allWeeks.value.length - 1;
-      syncDropdowns();
-      fetchWeekData();
-    }
-  } catch (e) {
-    console.error("Error cargando semanas:", e);
-    mapError.value = "Error conectando con el servidor.";
-  } finally {
-    loadingWeeks.value = false;
-  }
+  await loadWeeks();
 });
 
+onUnmounted(() => {
+  stopPlay();
+});
 
+// --- FUNCIONES ---
 
+const initMap = () => {
+  // Coordenadas centradas en Brasil
+  map = L.map('map').setView([-14.2350, -51.9253], 4); 
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19
+  }).addTo(map);
+};
 
-function initMap() {
-  // Forzamos el renderizado del mapa
-  map = L.map('map-brazil').setView([-14.2350, -51.9253], 4);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
-}
+const loadWeeks = async () => {
+  try {
+    loading.value = true;
+    const res = await axios.get(`${API_BASE}/brasil/weeks`);
+    weeks.value = res.data;
+    
+    if (weeks.value.length > 0) {
+      selectedWeekIndex.value = weeks.value.length - 1;
+    }
+  } catch (e) {
+    error.value = "Error cargando semanas: " + e.message;
+  } finally {
+    loading.value = false;
+  }
+};
 
-async function fetchWeekData() {
-  const week = allWeeks.value[sliderIndex.value];
+const loadWeekData = async () => {
+  const week = currentWeek.value;
   if (!week) return;
 
-  loadingMap.value = true;
-  mapError.value = null;
+  // 1. REVISAR CACHÉ (Velocidad instantánea si ya se visitó)
+  if (dataCache.has(week)) {
+    updateMapLayer(dataCache.get(week));
+    return;
+  }
 
   try {
-    console.log(`📡 Pidiendo datos para: ${week}...`); // ALARMA 2
-    const API_URL = import.meta.env.VITE_API_BASE_URL;
+    if (!isPlaying.value) loading.value = true;
 
-    const res = await axios.get(`${API_URL}/api/brasil?week=${week}`);
-
+    // Nota: Asegúrate que tu endpoint de Brasil acepte el parámetro "?week="
+    const res = await axios.get(`${API_BASE}/brasil`, {
+      params: { week: week }
+    });
     
-    // --- DIAGNÓSTICO PROFUNDO ---
-    const rawData = res.data;
-    console.log("📦 RESPUESTA API:", rawData); // ALARMA 3
+    const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
     
-    if (!rawData.features || rawData.features.length === 0) {
-        console.warn("⚠️ El GeoJSON vino vacío (0 features)");
-        mapError.value = `La semana ${week} no tiene datos geográficos.`;
-        loadingMap.value = false;
-        return;
-    }
-    console.log(`✅ Pintando ${rawData.features.length} municipios...`);
-    // -----------------------------
-
-    if (geoJsonLayer) map.removeLayer(geoJsonLayer);
+    // 2. GUARDAR EN CACHÉ
+    dataCache.set(week, data);
     
-    const stats = [];
-
-    geoJsonLayer = L.geoJson(rawData, {
-      style: style,
-      onEachFeature: (feature, layer) => {
-        // 1. DEFINIMOS LA VARIABLE (Ojo: viene como 'casos' del backend)
-        const valorCasos = feature.properties.casos || 0;
-        
-        // 2. Usamos 'valorCasos' para el Popup
-        layer.bindPopup(`<strong>${feature.properties.NM_MUN}</strong><br>Casos: ${valorCasos}`);
-
-        // 3. Usamos 'valorCasos' para la Tabla
-        if (valorCasos > 0) {
-          stats.push({
-            id: feature.properties.id_join,
-            name: feature.properties.NM_MUN,
-            cases: valorCasos, // <--- AQUÍ ESTABA EL ERROR (antes decía cases: cases)
-            bounds: layer.getBounds()
-          });
-        }
-      }
-    }).addTo(map);
-
-    // AUTO ZOOM
-    if (geoJsonLayer.getLayers().length > 0) {
-        map.fitBounds(geoJsonLayer.getBounds());
-    }
-
-    tableData.value = stats.sort((a, b) => b.cases - a.cases);
-
+    updateMapLayer(data);
   } catch (e) {
-    console.error("Error mapa:", e);
-    mapError.value = "Error cargando el mapa: " + e.message;
+    console.error("Error geojson:", e);
   } finally {
-    loadingMap.value = false;
+    loading.value = false;
   }
-}
+};
 
-function getColor(d) {
-    return d > 500 ? '#800026' : d > 200 ? '#BD0026' : d > 100 ? '#E31A1C' :
-           d > 50  ? '#FC4E2A' : d > 20  ? '#FD8D3C' : d > 10  ? '#FEB24C' :
-           d > 0   ? '#FED976' : '#FFEDA0';
-}
-function style(feature) {
-    return {
-        fillColor: getColor(feature.properties.casos || 0),
-        weight: 0.5,
-        opacity: 1,
-        color: 'white',
-        fillOpacity: 0.7
-    };
-}
-
-function prevWeek() {
-  if (sliderIndex.value > 0) {
-    sliderIndex.value--; // Restamos 1
-    onSliderChange();    // Actualizamos todo (mapa y dropdowns)
+const updateMapLayer = (data) => {
+  if (geoJsonLayer) {
+    geoJsonLayer.clearLayers();
+    map.removeLayer(geoJsonLayer);
   }
-}
+  geoJsonLayer = L.geoJSON(data, {
+    style: styleFeature,
+    onEachFeature: onEachFeature
+  }).addTo(map);
+};
 
-function nextWeek() {
-  if (sliderIndex.value < allWeeks.value.length - 1) {
-    sliderIndex.value++; // Sumamos 1
-    onSliderChange();    // Actualizamos todo
-  }
-}
-function syncDropdowns() {
-  const currentWeekStr = allWeeks.value[sliderIndex.value]; 
-  if(!currentWeekStr) return;
-  const [y, w] = currentWeekStr.split('-');
-  selectedYear.value = y;
-  selectedWeekOnly.value = w;
-}
-function onSliderChange() { syncDropdowns(); fetchWeekData(); }
-function updateSliderFromDropdown() {
-  const target = `${selectedYear.value}-${selectedWeekOnly.value}`;
-  const idx = allWeeks.value.indexOf(target);
-  if (idx !== -1) { sliderIndex.value = idx; fetchWeekData(); }
-}
-function zoomToMunicipality(bounds) { map.fitBounds(bounds, { maxZoom: 10 }); }
+// --- CONTROLES Y WATCHERS ---
+
+const prevWeek = () => {
+  if (selectedWeekIndex.value > 0) selectedWeekIndex.value--;
+};
+
+const nextWeek = () => {
+  if (selectedWeekIndex.value < weeks.value.length - 1) selectedWeekIndex.value++;
+};
+
+const togglePlay = () => {
+  isPlaying.value ? stopPlay() : startPlay();
+};
+
+const startPlay = () => {
+  isPlaying.value = true;
+  playInterval = setInterval(() => {
+    if (selectedWeekIndex.value < weeks.value.length - 1) {
+      selectedWeekIndex.value++;
+    } else {
+      selectedWeekIndex.value = 0;
+    }
+  }, 1500); // 1.5 segundos por salto
+};
+
+const stopPlay = () => {
+  isPlaying.value = false;
+  if (playInterval) clearInterval(playInterval);
+};
+
+watch(selectedWeekIndex, () => {
+  loadWeekData();
+});
+
+// --- ESTILOS ---
+const getColor = (d) => {
+  return d > 1000 ? '#800026' :
+         d > 500  ? '#BD0026' :
+         d > 200  ? '#E31A1C' :
+         d > 100  ? '#FC4E2A' :
+         d > 50   ? '#FD8D3C' :
+         d > 20   ? '#FEB24C' :
+         d > 0    ? '#FED976' : '#FFEDA0';
+};
+
+const styleFeature = (feature) => {
+  return {
+    fillColor: getColor(feature.properties.casos || 0), // Ajusta si tu propiedad se llama diferente
+    weight: 1,
+    opacity: 1,
+    color: 'white',
+    dashArray: '3',
+    fillOpacity: 0.7
+  };
+};
+
+const onEachFeature = (feature, layer) => {
+  const props = feature.properties;
+  const nombre = props.NM_MUN || props.name || "Municipio"; 
+  const popupContent = `
+    <strong>Municipio:</strong> ${nombre}<br/>
+    <strong>Casos:</strong> ${props.casos || 0}
+  `;
+  layer.bindPopup(popupContent);
+};
 </script>
 
 <style scoped>

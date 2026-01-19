@@ -95,7 +95,7 @@ let geoJsonLayer = null;
 
 const API_URL = import.meta.env.VITE_API_BASE_URL;
 
-const API_BASE = await axios.get(`${API_URL}/api`);
+const API_BASE = `${API_URL}/api`;
 
 
 // --- COMPUTADAS ---
