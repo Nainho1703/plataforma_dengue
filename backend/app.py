@@ -38,7 +38,8 @@ app = FastAPI(title="DengueViewer API")
 origins = [
     "http://localhost:5173",          # Tu Vue corriendo en local
     "http://127.0.0.1:5173",
-    "https://plataforma-dengue.onrender.com", # Tu URL real de Render
+    "https://plataforma-dengue.onrender.com",
+     "https://plataforma-dengue-1.onrender.com" # Tu URL real de Render
 ]
 
 app.add_middleware(
