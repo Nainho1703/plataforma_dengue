@@ -1,0 +1,14 @@
+# Archivos de python compilados
+__pycache__/
+*.pyc
+
+# Entornos virtuales (¡Muy importante no subir esto!)
+venv/
+env/
+.env
+
+# Archivos de sistema
+.DS_Store
+
+# Nota: NO ponemos 'dist/' aquí porque queremos subir tu frontend compilado
+# Nota: NO ponemos 'data/' aquí porque quieres subir el csv y el shp
